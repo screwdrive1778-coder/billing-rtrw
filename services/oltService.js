@@ -305,16 +305,26 @@ const CARD_STATUS_MAP = {
 
 // ─── DB CRUD ────────────────────────────────────────────────────────────────
 
+function decryptOlt(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    snmp_community: decryptValue(row.snmp_community),
+    web_password: decryptValue(row.web_password),
+    enable_password: decryptValue(row.enable_password)
+  };
+}
+
 function getAllOlts() {
-  return db.prepare('SELECT * FROM olts ORDER BY created_at DESC').all();
+  return db.prepare('SELECT * FROM olts ORDER BY created_at DESC').all().map(decryptOlt);
 }
 
 function getActiveOlts() {
-  return db.prepare('SELECT * FROM olts WHERE is_active = 1').all();
+  return db.prepare('SELECT * FROM olts WHERE is_active = 1').all().map(decryptOlt);
 }
 
 function getOltById(id) {
-  return db.prepare('SELECT * FROM olts WHERE id = ?').get(id);
+  return decryptOlt(db.prepare('SELECT * FROM olts WHERE id = ?').get(id));
 }
 
 function createOlt(data) {
@@ -327,16 +337,16 @@ function createOlt(data) {
   return stmt.run(
     data.name,
     data.host,
-    data.snmp_community || 'public',
+    encryptValue(String(data.snmp_community || '')),
     data.snmp_port || 161,
     data.brand || 'hioso',
     data.description || '',
     data.is_active !== undefined ? data.is_active : 1,
     data.web_user || '',
-    data.web_password || '',
+    encryptValue(String(data.web_password || '')),
     apiBase || null,
     Number.isFinite(telnetPort) && telnetPort > 0 ? telnetPort : 23,
-    data.enable_password != null && String(data.enable_password).length ? String(data.enable_password) : null
+    data.enable_password != null && String(data.enable_password).length ? encryptValue(String(data.enable_password)) : null
   );
 }
 
@@ -355,16 +365,16 @@ function updateOlt(id, data) {
   return stmt.run(
     data.name,
     data.host,
-    data.snmp_community,
+    encryptValue(String(data.snmp_community || '')),
     data.snmp_port,
     data.brand,
     data.description,
     data.is_active ? 1 : 0,
     data.web_user || '',
-    data.web_password || '',
+    encryptValue(String(data.web_password || '')),
     apiBase || null,
     Number.isFinite(telnetPort) && telnetPort > 0 ? telnetPort : 23,
-    enablePass,
+    enablePass ? encryptValue(String(enablePass)) : null,
     id
   );
 }
@@ -628,7 +638,7 @@ const parseHiosoOnuTable = (text) => {
 
 const fetchHiosoOnuDetailViaTelnet = async (olt) => {
   const user = olt.web_user || 'admin';
-  const pass = olt.web_password || 'admin';
+  const pass = decryptValue(olt.web_password) || 'admin';
   const cmds = [
     'show onu',
     'show onu all',
@@ -1465,7 +1475,7 @@ async function getOltStatsInternal(id, full = false) {
     uplink_tx:   0,
   };
 
-  const community  = olt.snmp_community || 'public';
+  const community  = decryptValue(olt.snmp_community) || 'public';
   const brandKey   = (olt.brand || 'hioso').toLowerCase();
   
   // Gabungkan semua profil untuk deteksi otomatis jika brand yang dipilih tidak cocok
@@ -1546,7 +1556,7 @@ async function getOltStatsInternal(id, full = false) {
         stats.snmpConfig = {
           host: olt.host,
           port: olt.snmp_port || 161,
-          community: olt.snmp_community || 'public',
+          community: decryptValue(olt.snmp_community) || 'public',
           brand: olt.brand
         };
         const onlineVals = getOnlineValues(detectedBrandKey, activeProfile);
@@ -1764,7 +1774,7 @@ async function rebootOnu(oltId, index) {
       vendor: olt.brand,
       host: olt.host,
       username: olt.web_user,
-      password: olt.web_password
+      password: decryptValue(olt.web_password)
     };
     const portVal = parseInt(olt.telnet_port, 10);
     oltConfig.port = (Number.isFinite(portVal) && portVal > 0) ? portVal : 22;
@@ -1773,7 +1783,7 @@ async function rebootOnu(oltId, index) {
     return await onuProvisionSvc.rebootONU(oltConfig, olt.brand, parsed);
   }
 
-  const community = olt.snmp_community || 'public';
+  const community = decryptValue(olt.snmp_community) || 'public';
   const session = snmp.createSession(olt.host, community, { port: olt.snmp_port || 161, version: snmp.Version2c });
   const oid = `1.3.6.1.4.1.25355.3.2.6.3.2.1.40.${index}`;
   return new Promise((resolve, reject) => {
@@ -1796,7 +1806,7 @@ async function renameOnu(oltId, index, newName) {
       vendor: olt.brand,
       host: olt.host,
       username: olt.web_user,
-      password: olt.web_password
+      password: decryptValue(olt.web_password)
     };
     const portVal = parseInt(olt.telnet_port, 10);
     oltConfig.port = (Number.isFinite(portVal) && portVal > 0) ? portVal : 22;
@@ -1806,7 +1816,7 @@ async function renameOnu(oltId, index, newName) {
     return await onuProvisionSvc.renameONU(oltConfig, olt.brand, parsed);
   }
 
-  const community = olt.snmp_community || 'public';
+  const community = decryptValue(olt.snmp_community) || 'public';
   const session = snmp.createSession(olt.host, community, { port: olt.snmp_port || 161, version: snmp.Version2c });
   const oid = `1.3.6.1.4.1.25355.3.2.6.3.2.1.37.${index}`;
   return new Promise((resolve, reject) => {
@@ -1868,7 +1878,7 @@ async function authorizeOnu(oltId, data) {
     throw new Error(`Fitur otorisasi otomatis belum didukung untuk brand ${brand}`);
   }
 
-  return await telnetLoginAndRun(olt.host, olt.web_user, olt.web_password, cmds, telnetOptsFromOlt(olt));
+  return await telnetLoginAndRun(olt.host, olt.web_user, decryptValue(olt.web_password), cmds, telnetOptsFromOlt(olt));
 }
 
 /**
@@ -1970,7 +1980,7 @@ function parseZteOnuIndex(index) {
 
 const telnetOptsFromOlt = (olt) => ({
   port: Number(olt.telnet_port) > 0 ? Number(olt.telnet_port) : 23,
-  enablePassword: olt.enable_password != null && String(olt.enable_password).length > 0 ? String(olt.enable_password) : null
+  enablePassword: decryptValue(olt.enable_password) != null && String(decryptValue(olt.enable_password)).length > 0 ? String(decryptValue(olt.enable_password)) : null
 });
 
 /**
@@ -2183,7 +2193,7 @@ async function configureWanViaAcs(sn, data) {
     cmds.push('exit');
     cmds.push('end');
     cmds.push('write');
-    return await telnetLoginAndRun(olt.host, olt.web_user, olt.web_password, cmds, telnetOptsFromOlt(olt));
+    return await telnetLoginAndRun(olt.host, olt.web_user, decryptValue(olt.web_password), cmds, telnetOptsFromOlt(olt));
   } else if (brand === 'huawei') {
      cmds.push('enable');
      cmds.push('config');
@@ -2198,7 +2208,7 @@ async function configureWanViaAcs(sn, data) {
      throw new Error(`Fitur konfigurasi WAN belum didukung untuk brand ${brand}`);
    }
  
-   return await telnetLoginAndRun(olt.host, olt.web_user, olt.web_password, cmds, telnetOptsFromOlt(olt));
+   return await telnetLoginAndRun(olt.host, olt.web_user, decryptValue(olt.web_password), cmds, telnetOptsFromOlt(olt));
  }
  
  async function getAllOltsStats(full = false) {

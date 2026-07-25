@@ -4,6 +4,7 @@
 const db = require('../config/database');
 const { logger } = require('../config/logger');
 const { getCurrentDateInTimezone, getSetting } = require('../config/settingsManager');
+const { encryptValue, decryptValue } = require('../config/settingsEncryption');
 
 // ─── HELPER FUNCTIONS ─────────────────────────────────────────
 /**
@@ -56,6 +57,16 @@ function getEffectiveRouterId(customerRouterId) {
   return null;
 }
 
+
+function decryptCustomerSecrets(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    pppoe_password: decryptValue(row.pppoe_password),
+    hotspot_password: decryptValue(row.hotspot_password)
+  };
+}
+
 // ─── CUSTOMERS ───────────────────────────────────────────────
 function getAllCustomers(search = '', routerId = null, filterStatus = '') {
   const now = getCurrentDateInTimezone();
@@ -101,7 +112,7 @@ function getAllCustomers(search = '', routerId = null, filterStatus = '') {
   }
 
   const whereSql = whereClauses.length > 0 ? ` WHERE ` + whereClauses.join(' AND ') : '';
-  return db.prepare(base + whereSql + ` ORDER BY c.name ASC`).all(...params);
+  return db.prepare(base + whereSql + ` ORDER BY c.name ASC`).all(...params).map(decryptCustomerSecrets);
 }
 
 function resetPromoCyclesUsed(customerId) {
@@ -111,7 +122,7 @@ function resetPromoCyclesUsed(customerId) {
 }
 
 function getCustomerById(id) {
-  return db.prepare(`
+  const row = db.prepare(`
     SELECT c.*, p.name as package_name, p.price as package_price,
            p.promo_cycles as package_promo_cycles,
            p.prorate_first_invoice as package_prorate_first_invoice,
@@ -123,6 +134,7 @@ function getCustomerById(id) {
     LEFT JOIN odps odp ON c.odp_id = odp.id
     WHERE c.id = ?
   `).get(id);
+  return decryptCustomerSecrets(row);
 }
 
 function createCustomer(data) {
@@ -139,7 +151,7 @@ function createCustomer(data) {
     data.lat || '',
     data.lng || '',
     data.genieacs_tag || '', data.pppoe_username || '',
-    data.pppoe_password || '',
+    encryptValue(String(data.pppoe_password || '')),
     data.pppoe_remote_address || '',
     data.isolir_profile || 'isolir',
     data.status || 'active',
@@ -150,7 +162,7 @@ function createCustomer(data) {
     data.static_ip || '',
     data.mac_address || '',
     data.hotspot_username || '',
-    data.hotspot_password || '',
+    encryptValue(String(data.hotspot_password || '')),
     data.hotspot_profile || '',
     data.collector_id ? parseInt(data.collector_id) : null
   );
@@ -174,7 +186,7 @@ function updateCustomer(id, data) {
     data.lat || '',
     data.lng || '',
     data.genieacs_tag || '', data.pppoe_username || '',
-    data.pppoe_password || '',
+    encryptValue(String(data.pppoe_password || '')),
     data.pppoe_remote_address || '',
     data.isolir_profile || 'isolir',
     data.status || 'active',
@@ -186,7 +198,7 @@ function updateCustomer(id, data) {
     data.static_ip || '',
     data.mac_address || '',
     data.hotspot_username || '',
-    data.hotspot_password || '',
+    encryptValue(String(data.hotspot_password || '')),
     data.hotspot_profile || '',
     data.collector_id ? parseInt(data.collector_id) : null,
     id

@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const rawAxios = require('axios');
 const db = require('../config/database');
-const { getSetting, getSettings } = require('../config/settingsManager');
+const { encryptValue, decryptValue } = require('../config/settingsEncryption');
+const { getSetting, getSettings, saveSettings } = require('../config/settingsManager');
 const sidebarMenuSvc = require('../services/sidebarMenuService');
 const customerDevice = require('../services/customerDeviceService');
 const mikrotikSvc = require('../services/mikrotikService');
@@ -107,7 +108,7 @@ function getAxiosConfig(server) {
     if (server.username && server.password) {
         config.auth = {
             username: server.username,
-            password: server.password
+            password: decryptValue(server.password)
         };
     }
     return config;
@@ -1107,9 +1108,10 @@ router.get('/device/:deviceId', async (req, res) => {
 router.post('/api/servers', requireAdmin, async (req, res) => {
     const { name, url, username, password, location } = req.body;
     try {
+        if (!/^https:\/\//i.test(String(url || '').trim())) return res.status(400).json({ success: false, message: 'URL ACS wajib menggunakan https:// (SSL/TLS)' });
         db.prepare(
             'INSERT INTO genieacs_servers (name, url, username, password, location) VALUES (?, ?, ?, ?, ?)'
-        ).run(name, url, username || null, password || null, location || '');
+        ).run(name, url, username || null, password ? encryptValue(String(password)) : null, location || '');
         res.json({ success: true, message: 'ACS server added' });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -1121,7 +1123,7 @@ router.put('/api/servers/legacy', requireAdmin, express.json(), async (req, res)
     try {
         const url = String(req.body?.url || '').trim();
         if (!url) return res.status(400).json({ success: false, message: 'URL wajib diisi' });
-        if (!/^https?:\/\//i.test(url)) return res.status(400).json({ success: false, message: 'URL harus diawali http:// atau https://' });
+        if (!/^https:\/\//i.test(url)) return res.status(400).json({ success: false, message: 'URL ACS wajib menggunakan https:// (SSL/TLS)' });
 
         const clearUsername = Boolean(req.body?.clear_username);
         const clearPassword = Boolean(req.body?.clear_password);
@@ -1137,8 +1139,7 @@ router.put('/api/servers/legacy', requireAdmin, express.json(), async (req, res)
         if (clearPassword) currentSettings.genieacs_password = '';
         else if (String(passwordInput || '').trim()) currentSettings.genieacs_password = String(passwordInput || '');
 
-        const settingsPath = path.join(__dirname, '../settings.json');
-        fs.writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2), 'utf8');
+        saveSettings(currentSettings);
 
         res.json({ success: true, message: 'Default ACS berhasil diperbarui.' });
     } catch (e) {
@@ -1155,6 +1156,7 @@ router.put('/api/servers/:id', requireAdmin, async (req, res) => {
         const name = String(req.body?.name || '').trim();
         const url = String(req.body?.url || '').trim();
         if (!name || !url) return res.status(400).json({ success: false, message: 'Name and URL are required' });
+        if (!/^https:\/\//i.test(url)) return res.status(400).json({ success: false, message: 'URL ACS wajib menggunakan https:// (SSL/TLS)' });
 
         const existing = db.prepare('SELECT id, password FROM genieacs_servers WHERE id = ?').get(id);
         if (!existing) return res.status(404).json({ success: false, message: 'ACS server not found' });
@@ -1168,13 +1170,13 @@ router.put('/api/servers/:id', requireAdmin, async (req, res) => {
 
         const username = clearUsername ? null : (String(usernameRaw || '').trim() || null);
 
-        let password = existing.password || null;
+        let password = decryptValue(existing.password) || null;
         if (clearPassword) password = null;
         else if (String(passwordRaw || '').trim()) password = String(passwordRaw || '');
 
         db.prepare(
             'UPDATE genieacs_servers SET name = ?, url = ?, username = ?, password = ?, location = ? WHERE id = ?'
-        ).run(name, url, username, password, location, id);
+        ).run(name, url, username, password ? encryptValue(String(password)) : null, location, id);
 
         res.json({ success: true, message: 'ACS server updated' });
     } catch (e) {

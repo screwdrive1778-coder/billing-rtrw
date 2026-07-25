@@ -2,6 +2,7 @@ const axios = require('axios');
 require('dotenv').config();
 const { logger } = require('./logger');
 const db = require('./database');
+const { decryptValue } = require('./settingsEncryption');
 const { getSetting } = require('./settingsManager');
 
 // ─── Built-in ACS Helpers ────────────────────────────────────────────────────
@@ -392,7 +393,7 @@ function createAxiosInstance(server) {
     if (server.username && server.password) {
         config.auth = {
             username: server.username,
-            password: server.password
+            password: decryptValue(server.password)
         };
     }
     
