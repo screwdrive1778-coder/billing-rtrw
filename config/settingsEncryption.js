@@ -1,184 +1,131 @@
 /**
  * Settings Encryption & Decryption
- * Untuk encrypt/decrypt sensitive fields di settings.json
+ * AES-256-GCM for sensitive values stored in JSON/SQLite.
  */
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { logger } = require('./logger');
 
-// Master key untuk encryption (bisa dari environment variable)
-// PENTING: Ganti dengan key yang aman di production
-const MASTER_KEY = process.env.SETTINGS_MASTER_KEY || 'default-master-key-change-this-in-production';
+const DEFAULT_MASTER_KEY = 'default-master-key-change-this-in-production';
+const LOCAL_KEY_PATH = process.env.SETTINGS_KEY_FILE || path.join(__dirname, '.settings.key');
 
-function getMasterKeyForString(keyStr) {
-  const hash = crypto.createHash('sha256');
-  hash.update(keyStr || '');
-  return hash.digest();
+function readOrCreateLocalKey() {
+  if (process.env.SETTINGS_MASTER_KEY && String(process.env.SETTINGS_MASTER_KEY).trim()) {
+    return String(process.env.SETTINGS_MASTER_KEY).trim();
+  }
+  try {
+    if (fs.existsSync(LOCAL_KEY_PATH)) return fs.readFileSync(LOCAL_KEY_PATH, 'utf8').trim();
+    const key = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(LOCAL_KEY_PATH, key, { mode: 0o600 });
+    try { fs.chmodSync(LOCAL_KEY_PATH, 0o600); } catch {}
+    logger.warn(`[encryption] SETTINGS_MASTER_KEY is not set; generated local key at ${LOCAL_KEY_PATH}. Back it up or set SETTINGS_MASTER_KEY before production deployment.`);
+    return key;
+  } catch (error) {
+    logger.error(`[encryption] Failed to read/create local encryption key: ${error.message}`);
+    return DEFAULT_MASTER_KEY;
+  }
 }
 
-// Normalize master key ke 32 bytes untuk AES-256
+const MASTER_KEY = readOrCreateLocalKey();
+
+function getMasterKeyForString(keyStr) {
+  return crypto.createHash('sha256').update(keyStr || '').digest();
+}
+
 function getMasterKey() {
   return getMasterKeyForString(MASTER_KEY);
 }
 
-// List field yang harus di-encrypt
 const SENSITIVE_FIELDS = [
-  'genieacs_password',
-  'admin_password',
-  'admin_api_key',
-  'mikrotik_password',
-  'tripay_api_key',
-  'tripay_private_key',
-  'midtrans_server_key',
-  'telegram_bot_token',
-  'xendit_api_key',
-  'duitku_api_key',
-  'session_secret'
+  'genieacs_password', 'admin_password', 'admin_api_key', 'mikrotik_password',
+  'tripay_api_key', 'tripay_private_key', 'midtrans_server_key', 'telegram_bot_token',
+  'xendit_api_key', 'duitku_api_key', 'digiflazz_api_key', 'digiflazz_webhook_secret',
+  'session_secret', 'web_password', 'enable_password', 'snmp_community', 'password'
 ];
 
-/**
- * Encrypt value menggunakan AES-256-GCM
- */
+function isEncryptedValue(value) {
+  return typeof value === 'string' && value.startsWith('enc:v1:');
+}
+
 function encryptValue(value) {
   if (!value || typeof value !== 'string') return value;
-  
-  try {
-    const masterKey = getMasterKey();
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
-    
-    let encrypted = cipher.update(value, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    
-    const authTag = cipher.getAuthTag();
-    
-    // Format: iv:authTag:encrypted
-    return `enc:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
-  } catch (error) {
-    logger.error(`[encryption] Error encrypting value: ${error.message}`);
-    return value;
-  }
+  if (isEncryptedValue(value)) return value;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getMasterKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString('base64url')}:${authTag.toString('base64url')}:${encrypted.toString('base64url')}`;
 }
 
 function decryptWithKey(encryptedValue, key) {
   const parts = encryptedValue.split(':');
-  if (parts.length !== 4) {
-    throw new Error('Invalid encrypted value format');
+  if (parts.length === 5 && parts[0] === 'enc' && parts[1] === 'v1') {
+    const [, , ivB64, authTagB64, encryptedB64] = parts;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64url'));
+    decipher.setAuthTag(Buffer.from(authTagB64, 'base64url'));
+    return Buffer.concat([
+      decipher.update(Buffer.from(encryptedB64, 'base64url')),
+      decipher.final()
+    ]).toString('utf8');
   }
-  
-  const [prefix, ivHex, authTagHex, encrypted] = parts;
-  const iv = Buffer.from(ivHex, 'hex');
-  const authTag = Buffer.from(authTagHex, 'hex');
-  
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(authTag);
-  
-  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  
-  return decrypted;
+  if (parts.length === 4 && parts[0] === 'enc') {
+    const [, ivHex, authTagHex, encrypted] = parts;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  }
+  throw new Error('Invalid encrypted value format');
 }
 
-/**
- * Decrypt value
- */
 function decryptValue(encryptedValue) {
   if (!encryptedValue || typeof encryptedValue !== 'string') return encryptedValue;
-  if (!encryptedValue.startsWith('enc:')) return encryptedValue; // Belum di-encrypt
-  
-  const primaryKey = getMasterKey();
+  if (!encryptedValue.startsWith('enc:')) return encryptedValue;
   try {
-    return decryptWithKey(encryptedValue, primaryKey);
+    return decryptWithKey(encryptedValue, getMasterKey());
   } catch (error) {
-    // If decryption fails, and primaryKey is not the default fallback key, try the fallback key
-    const defaultSecret = 'default-master-key-change-this-in-production';
-    if (MASTER_KEY !== defaultSecret) {
-      try {
-        const fallbackKey = getMasterKeyForString(defaultSecret);
-        const decrypted = decryptWithKey(encryptedValue, fallbackKey);
-        logger.info('[encryption] Successfully decrypted value using default fallback key. It will be re-encrypted using the new key upon next save.');
-        return decrypted;
-      } catch (fallbackError) {
-        // Both primary key and fallback key failed
-        logger.error(`[encryption] Error decrypting value (both primary and fallback keys failed): ${fallbackError.message}`);
-      }
-    } else {
-      logger.error(`[encryption] Error decrypting value: ${error.message}`);
+    try {
+      return decryptWithKey(encryptedValue, getMasterKeyForString(DEFAULT_MASTER_KEY));
+    } catch (fallbackError) {
+      logger.error(`[encryption] Error decrypting value: ${fallbackError.message}`);
+      return encryptedValue;
     }
-    return encryptedValue;
   }
 }
 
-/**
- * Encrypt sensitive fields dalam settings object
- */
 function encryptSettings(settings) {
   const encrypted = { ...settings };
-  
-  SENSITIVE_FIELDS.forEach(field => {
-    if (encrypted[field]) {
-      encrypted[field] = encryptValue(encrypted[field]);
-    }
+  SENSITIVE_FIELDS.forEach((field) => {
+    if (encrypted[field]) encrypted[field] = encryptValue(String(encrypted[field]));
   });
-  
   return encrypted;
 }
 
-/**
- * Decrypt sensitive fields dalam settings object
- */
 function decryptSettings(settings) {
   const decrypted = { ...settings };
-  
-  SENSITIVE_FIELDS.forEach(field => {
-    if (decrypted[field]) {
-      decrypted[field] = decryptValue(decrypted[field]);
-    }
+  SENSITIVE_FIELDS.forEach((field) => {
+    if (decrypted[field]) decrypted[field] = decryptValue(decrypted[field]);
   });
-  
   return decrypted;
 }
 
-/**
- * Mask sensitive values untuk display (show first 4 & last 4 chars)
- */
 function maskValue(value) {
   if (!value || typeof value !== 'string') return value;
-  if (value.length <= 8) return '****';
-  
-  const first = value.substring(0, 4);
-  const last = value.substring(value.length - 4);
-  return `${first}****${last}`;
+  const plain = decryptValue(value);
+  if (plain.length <= 8) return '****';
+  return `${plain.substring(0, 4)}****${plain.substring(plain.length - 4)}`;
 }
 
-/**
- * Get masked settings untuk display di UI
- */
 function getMaskedSettings(settings) {
   const masked = { ...settings };
-  
-  SENSITIVE_FIELDS.forEach(field => {
-    if (masked[field]) {
-      masked[field] = maskValue(masked[field]);
-    }
+  SENSITIVE_FIELDS.forEach((field) => {
+    if (masked[field]) masked[field] = maskValue(masked[field]);
   });
-  
   return masked;
 }
 
-/**
- * Check apakah field adalah sensitive
- */
-function isSensitiveField(field) {
-  return SENSITIVE_FIELDS.includes(field);
-}
+function isSensitiveField(field) { return SENSITIVE_FIELDS.includes(field); }
 
-module.exports = {
-  encryptValue,
-  decryptValue,
-  encryptSettings,
-  decryptSettings,
-  maskValue,
-  getMaskedSettings,
-  isSensitiveField,
-  SENSITIVE_FIELDS
-};
+module.exports = { encryptValue, decryptValue, encryptSettings, decryptSettings, maskValue, getMaskedSettings, isSensitiveField, isEncryptedValue, SENSITIVE_FIELDS };

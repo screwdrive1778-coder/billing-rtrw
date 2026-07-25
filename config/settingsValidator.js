@@ -35,8 +35,8 @@ const VALIDATION_RULES = {
   },
   public_base_url: {
     type: 'string',
-    pattern: /^https?:\/\/.+/,
-    description: 'URL publik aplikasi (http://... atau https://...)'
+    pattern: /^https:\/\/.+/,
+    description: 'URL publik aplikasi wajib HTTPS untuk production'
   },
   company_manager: {
     type: 'string',
@@ -92,8 +92,8 @@ const VALIDATION_RULES = {
   // GenieACS Configuration
   genieacs_url: {
     type: 'string',
-    pattern: /^https?:\/\/.+/,
-    description: 'URL GenieACS (http://...)'
+    pattern: /^https:\/\/.+/,
+    description: 'URL GenieACS wajib HTTPS agar koneksi ACS terlindungi SSL/TLS'
   },
   genieacs_username: {
     type: 'string',

@@ -5,6 +5,7 @@ const { RouterOSClient } = require('routeros-client');
 const { getSettingsWithCache } = require('../config/settingsManager');
 const { logger } = require('../config/logger');
 const db = require('../config/database');
+const { encryptValue, decryptValue } = require('../config/settingsEncryption');
 
 // Runtime patches for node-routeros to prevent uncaught exceptions under RouterOS v7
 try {
@@ -269,7 +270,7 @@ async function getConnection(routerId = null) {
     host = router.host;
     port = router.port || 8728;
     user = router.user;
-    password = router.password;
+    password = decryptValue(router.password);
   } else {
     // Tidak ada routerId, coba cari router default dari database
     const defaultRouter = db.prepare('SELECT * FROM routers WHERE is_active = 1 ORDER BY id ASC LIMIT 1').get();
@@ -279,7 +280,7 @@ async function getConnection(routerId = null) {
       host = defaultRouter.host;
       port = defaultRouter.port || 8728;
       user = defaultRouter.user;
-      password = defaultRouter.password;
+      password = decryptValue(defaultRouter.password);
       logger.info(`[MikroTik] Using default router from database: ${defaultRouter.name} (${defaultRouter.host})`);
     } else {
       // Fallback ke settings.json untuk backward compatibility
@@ -297,9 +298,10 @@ async function getConnection(routerId = null) {
   }
 
   const configuredPort = Number(port) || 8728;
-  const tlsSetting = getSettingsWithCache().mikrotik_tls === true;
-  const fallbackPort = configuredPort === 8728 ? 8729 : 8728;
-  const candidates = configuredPort === fallbackPort ? [configuredPort] : [configuredPort, fallbackPort];
+  const settings = getSettingsWithCache();
+  const tlsSetting = settings.mikrotik_tls !== false;
+  const fallbackPort = configuredPort === 8729 ? 8728 : 8729;
+  const candidates = configuredPort === 8728 && tlsSetting ? [8729, 8728] : (configuredPort === fallbackPort ? [configuredPort] : [configuredPort, fallbackPort]);
   const cacheKey = String(host);
   const now = Date.now();
   const cached = connectionProbeCache.get(cacheKey);
@@ -1295,25 +1297,26 @@ async function deleteHotspotProfile(id, routerId = null) {
 
 // Router CRUD Services
 function getAllRouters() {
-  return db.prepare('SELECT * FROM routers ORDER BY name ASC').all();
+  return db.prepare('SELECT * FROM routers ORDER BY name ASC').all().map(r => ({ ...r, password: decryptValue(r.password) }));
 }
 
 function getRouterById(id) {
-  return db.prepare('SELECT * FROM routers WHERE id = ?').get(id);
+  const row = db.prepare('SELECT * FROM routers WHERE id = ?').get(id);
+  return row ? { ...row, password: decryptValue(row.password) } : row;
 }
 
 function createRouter(data) {
   return db.prepare(`
     INSERT INTO routers (name, host, port, user, password, description, is_active)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(data.name, data.host, data.port || 8728, data.user, data.password, data.description || '', data.is_active || 1);
+  `).run(data.name, data.host, data.port || 8729, data.user, encryptValue(String(data.password || '')), data.description || '', data.is_active || 1);
 }
 
 function updateRouter(id, data) {
   return db.prepare(`
     UPDATE routers SET name=?, host=?, port=?, user=?, password=?, description=?, is_active=?
     WHERE id=?
-  `).run(data.name, data.host, data.port || 8728, data.user, data.password, data.description || '', data.is_active || 1, id);
+  `).run(data.name, data.host, data.port || 8729, data.user, encryptValue(String(data.password || '')), data.description || '', data.is_active || 1, id);
 }
 
 function deleteRouter(id) {

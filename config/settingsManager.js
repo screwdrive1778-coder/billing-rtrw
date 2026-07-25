@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { logger } = require('./logger');
+const { encryptSettings, decryptSettings, isSensitiveField, isEncryptedValue } = require('./settingsEncryption');
 
 let runtimeSessionSecret = null;
 function getSecureSessionSecretFallback() {
@@ -18,12 +19,27 @@ const CACHE_DURATION = 2000; // 2 detik
 
 // File system watcher untuk auto-reload settings
 const settingsPath = path.join(__dirname, '../settings.json');
+
+function persistEncryptedSettingsIfNeeded(rawSettings) {
+  if (process.env.SETTINGS_AUTO_ENCRYPT === '0') return;
+  const hasPlainSecret = Object.entries(rawSettings || {}).some(([key, value]) => (
+    isSensitiveField(key) && typeof value === 'string' && value.trim() && !isEncryptedValue(value)
+  ));
+  if (!hasPlainSecret) return;
+
+  const encrypted = encryptSettings(rawSettings);
+  fs.writeFileSync(settingsPath, JSON.stringify(encrypted, null, 2), 'utf-8');
+  try { fs.chmodSync(settingsPath, 0o600); } catch {}
+  logger.warn('[settings] Plaintext secrets in settings.json were encrypted at rest.');
+}
 let watcher = null;
 
 // Helper untuk baca settings.json secara dinamis
 function getSettings() {
   try {
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) || {};
+    const rawSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) || {};
+    persistEncryptedSettingsIfNeeded(rawSettings);
+    const settings = decryptSettings(rawSettings);
     
     // Secure fallback for session_secret
     const defaultSecret = 'rahasia-portal-pelanggan-default-ganti-ini';
@@ -108,21 +124,26 @@ function startSettingsWatcher() {
       }
     });
 
+    if (watcher && typeof watcher.unref === 'function') watcher.unref();
     logger.info('[settings] Memantau perubahan settings.json');
   } catch (error) {
     logger.error(`[settings] Error starting settings watcher: ${error.message}`);
   }
 }
 
-// Mulai watcher saat modul dimuat
-startSettingsWatcher();
+// Mulai watcher saat modul dimuat. Bisa dinonaktifkan untuk CLI/test agar process tidak tertahan.
+if (process.env.SETTINGS_WATCH !== '0') {
+  startSettingsWatcher();
+}
 
 // Menyimpan pengaturan ke settings.json
 function saveSettings(newSettings) {
   try {
     const currentSettings = getSettings();
     const updatedSettings = { ...currentSettings, ...newSettings };
-    fs.writeFileSync(settingsPath, JSON.stringify(updatedSettings, null, 2), 'utf-8');
+    const encryptedSettings = encryptSettings(updatedSettings);
+    fs.writeFileSync(settingsPath, JSON.stringify(encryptedSettings, null, 2), 'utf-8');
+    try { fs.chmodSync(settingsPath, 0o600); } catch {}
     settingsCache = updatedSettings;
     settingsCacheTime = Date.now();
     return true;

@@ -6,6 +6,7 @@ const odpSvc = require('../services/odpService');
 const { getSetting, getNowLocal, getCurrentDateInTimezone, getNowLocalISO, formatDateLocal, getSettings, formatTimeLocal, parseDateInTimezone } = require('../config/settingsManager');
 const mikrotikService = require('../services/mikrotikService');
 const db = require('../config/database');
+const { decryptValue } = require('../config/settingsEncryption');
 const oltSvc = require('../services/oltService');
 const attendanceSvc = require('../services/attendanceService');
 const multer = require('multer');
@@ -823,7 +824,7 @@ function getAxiosConfig(server) {
     if (server.username && server.password) {
         config.auth = {
             username: server.username,
-            password: server.password
+            password: decryptValue(server.password)
         };
     }
     return config;
